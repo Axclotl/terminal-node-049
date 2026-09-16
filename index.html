@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>node049 :: remote shell</title>
+<style>
+  :root{
+    --bg:#0a0a08;
+    --amber:#d9a441;
+    --amber-dim:#6b5220;
+    --red:#ff3b3b;
+    --scan-op:0.05;
+  }
+
+  *{ box-sizing:border-box; }
+
+  html,body{
+    margin:0; padding:0; height:100%;
+    background:var(--bg);
+    overflow:hidden;
+    font-family:'Courier New', Consolas, monospace;
+  }
+
+  /* continuous CRT scanline flicker on the body */
+  @keyframes bodyflicker{
+    0%, 91%, 100% { filter:brightness(1); }
+    92% { filter:brightness(0.93); }
+    94% { filter:brightness(1.02); }
+    96% { filter:brightness(0.9); }
+    98% { filter:brightness(1); }
+  }
+  body{
+    animation: bodyflicker 5.5s infinite;
+  }
+
+  #crt{
+    position:relative;
+    width:100%; height:100vh;
+    background:#0a0a08;
+    overflow:hidden;
+  }
+
+  /* scanline texture */
+  #crt::before{
+    content:"";
+    position:absolute; top:0; left:0; right:0; bottom:0;
+    background:repeating-linear-gradient(
+      to bottom,
+      rgba(217,164,65,var(--scan-op)) 0px,
+      rgba(217,164,65,var(--scan-op)) 1px,
+      transparent 2px, transparent 4px
+    );
+    pointer-events:none; z-index:5; mix-blend-mode:overlay;
+  }
+
+  /* vignette */
+  #crt::after{
+    content:"";
+    position:absolute; top:0; left:0; right:0; bottom:0;
+    box-shadow: inset 0 0 14vw rgba(0,0,0,0.9);
+    pointer-events:none; z-index:6;
+  }
+
+  #wrap{
+    position:relative; z-index:2;
+    height:100%;
+    padding:22px 30px;
+    display:flex;
+    flex-direction:column;
+  }
+
+  #titlebar{
+    color:var(--amber-dim);
+    font-size:12px;
+    letter-spacing:1px;
+    border-bottom:1px solid var(--amber-dim);
+    padding-bottom:8px;
+    margin-bottom:10px;
+    display:flex;
+    justify-content:space-between;
+  }
+
+  #audio-indicator{
+    font-size:11px;
+    opacity:0.7;
+  }
+
+  #output{
+    flex:1;
+    overflow-y:auto;
+    color:var(--amber);
+    font-size:14px;
+    line-height:1.45;
+    white-space:pre-wrap;
+    word-break:break-word;
+    text-shadow:0 0 2px rgba(217,164,65,0.35);
+  }
+
+  #output::-webkit-scrollbar{ width:7px; }
+  #output::-webkit-scrollbar-thumb{ background:var(--amber-dim); }
+  #output::-webkit-scrollbar-track{ background:#050503; }
+
+  .l{ margin:0; }
+  .l-in{ color:#e8c27a; }
+  .l-out{ color:var(--amber); }
+  .l-dim{ color:var(--amber-dim); }
+  .l-warn{ color:#ffcf6b; }
+  .l-crit{ color:var(--red); }
+  .l-final{ color:#fff; font-weight:bold; }
+  .l-crash{ color:#b9b9b9; }
+  .l-crash-head{ color:var(--red); font-weight:bold; }
+  .l-lore{ color:#c9a55a; }
+  .l-cipher{ color:#8fa877; }
+
+  #row{
+    display:flex; align-items:center;
+    border-top:1px solid var(--amber-dim);
+    padding-top:9px; margin-top:8px;
+  }
+
+  #row.hidden{ display:none; }
+
+  #ps{
+    color:var(--amber);
+    margin-right:8px;
+    white-space:nowrap;
+    font-size:14px;
+  }
+
+  #in{
+    flex:1;
+    background:transparent;
+    border:none; outline:none;
+    color:var(--amber);
+    font-family:inherit;
+    font-size:14px;
+    caret-color:var(--amber);
+  }
+
+  /* command-triggered glitch (600ms) */
+  @keyframes shk{
+    0%{transform:translate(0,0);}
+    15%{transform:translate(-3px,2px);}
+    30%{transform:translate(3px,-2px);}
+    45%{transform:translate(-2px,-3px);}
+    60%{transform:translate(2px,3px);}
+    75%{transform:translate(-3px,1px);}
+    90%{transform:translate(3px,-1px);}
+    100%{transform:translate(0,0);}
+  }
+  @keyframes gcol{
+    0%,100%{filter:none;}
+    25%{filter:hue-rotate(30deg) saturate(2.5) contrast(1.3);}
+    50%{filter:invert(0.12);}
+    75%{filter:contrast(1.6) saturate(1.8);}
+  }
+  .terminal-glitch #crt{ animation: shk 0.32s infinite, gcol 0.55s infinite; }
+  .terminal-glitch #wrap{ animation: shk 0.26s infinite; }
+
+  /* more intense variant for the final crash */
+  @keyframes shkHard{
+    0%{transform:translate(0,0);}
+    10%{transform:translate(-6px,4px);}
+    20%{transform:translate(6px,-4px);}
+    30%{transform:translate(-5px,-6px);}
+    40%{transform:translate(5px,6px);}
+    50%{transform:translate(-7px,2px);}
+    60%{transform:translate(7px,-2px);}
+    70%{transform:translate(-4px,4px);}
+    80%{transform:translate(4px,-4px);}
+    90%{transform:translate(-3px,0);}
+    100%{transform:translate(0,0);}
+  }
+  .terminal-glitch-hard #crt{ animation: shkHard 0.18s infinite, gcol 0.3s infinite; }
+  .terminal-glitch-hard #wrap{ animation: shkHard 0.15s infinite; }
+
+  #crash{
+    display:none;
+    position:absolute; top:0; left:0; right:0; bottom:0;
+    z-index:8;
+    background:#050503;
+    color:#b9b9b9;
+    padding:22px 30px;
+    overflow-y:auto;
+    font-size:13px;
+    line-height:1.45;
+    white-space:pre-wrap;
+    word-break:break-word;
+  }
+  #crash.visible{ display:block; }
+  #crash::-webkit-scrollbar{ width:7px; }
+  #crash::-webkit-scrollbar-thumb{ background:#333; }
+  #crash::-webkit-scrollbar-track{ background:#050503; }
+
+  @media (max-width:600px){
+    #wrap{ padding:12px 12px; }
+    #titlebar{ font-size:10px; }
+    #output,#in,#ps{ font-size:12px; }
+    #crash{ padding:12px 12px; font-size:11px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="crt">
+  <div id="wrap">
+    <div id="titlebar">
+      <span>node049 :: remote shell -- session active</span>
+      <span id="audio-indicator">audio: click or press a key to init</span>
+    </div>
+    <div id="output"></div>
+    <div id="row">
+      <span id="ps">$</span>
+      <input id="in" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus />
+    </div>
+  </div>
+  <div id="crash"></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ---------------------------------------------------------
+     Fragment Alpha cached client-side. DevTools clue: an
+     operator inspecting Application > Local Storage (or
+     running `localStorage` in the console) finds this.
+     This is only half of the override key -- Fragment Beta
+     must be decoded manually from encrypted_signal.b64.
+  --------------------------------------------------------- */
+  try{
+    localStorage.setItem('node_sector', 'echo_protocol');
+  } catch(e){
+    /* localStorage unavailable (e.g. private mode) --
+       override will simply always reject in that case. */
+  }
+
+  var KERNEL_KEY = "echo_protocol_severance";
+
+  var out = document.getElementById('output');
+  var input = document.getElementById('in');
+  var row = document.getElementById('row');
+  var crash = document.getElementById('crash');
+  var body = document.body;
+  var audioIndicator = document.getElementById('audio-indicator');
+
+  var overrideComplete = false;
+
+  /* ---------------------------------------------------------
+     WEB AUDIO: 60Hz server hum
+     Initializes lazily on first user gesture (click or
+     keypress), as required by browser autoplay policies.
+  --------------------------------------------------------- */
+  var audioCtx = null;
+  var humOsc = null;
+  var humGain = null;
+  var audioReady = false;
+
+  function initAudio(){
+    if(audioReady) return;
+    audioReady = true;
+    try{
+      var AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new AudioContextClass();
+
+      humOsc = audioCtx.createOscillator();
+      humOsc.type = 'sine';
+      humOsc.frequency.setValueAtTime(60, audioCtx.currentTime);
+
+      humGain = audioCtx.createGain();
+      humGain.gain.setValueAtTime(0, audioCtx.currentTime);
+      humGain.gain.linearRampToValueAtTime(0.035, audioCtx.currentTime + 1.2);
+
+      humOsc.connect(humGain);
+      humGain.connect(audioCtx.destination);
+      humOsc.start();
+
+      audioIndicator.textContent = "audio: hum active (60hz)";
+    } catch(e){
+      audioIndicator.textContent = "audio: unavailable";
+    }
+  }
+
+  function initAudioOnce(){
+    initAudio();
+    window.removeEventListener('click', initAudioOnce);
+    window.removeEventListener('keydown', initAudioOnce);
+  }
+  window.addEventListener('click', initAudioOnce);
+  window.addEventListener('keydown', initAudioOnce);
+
+  /* Brief pitch/volume surge on glitch-triggering commands. */
+  function audioSurge(durationMs){
+    if(!audioReady || !audioCtx || !humOsc || !humGain) return;
+    var now = audioCtx.currentTime;
+    var dur = (durationMs || 600) / 1000;
+
+    humOsc.frequency.cancelScheduledValues(now);
+    humOsc.frequency.setValueAtTime(60, now);
+    humOsc.frequency.linearRampToValueAtTime(140, now + dur * 0.4);
+    humOsc.frequency.linearRampToValueAtTime(60, now + dur);
+
+    humGain.gain.cancelScheduledValues(now);
+    humGain.gain.setValueAtTime(0.035, now);
+    humGain.gain.linearRampToValueAtTime(0.13, now + dur * 0.4);
+    humGain.gain.linearRampToValueAtTime(0.035, now + dur);
+  }
+
+  /* Cut audio to complete silence for the final crash sequence. */
+  function audioCutToSilence(fadeMs){
+    if(!audioReady || !audioCtx || !humGain) return;
+    var now = audioCtx.currentTime;
+    var fade = (fadeMs || 400) / 1000;
+    humGain.gain.cancelScheduledValues(now);
+    humGain.gain.setValueAtTime(humGain.gain.value, now);
+    humGain.gain.linearRampToValueAtTime(0.0001, now + fade);
+    setTimeout(function(){
+      try{ humOsc.stop(); } catch(e){}
+    }, fadeMs + 50);
+  }
+
+  /* ---------------------------------------------------------
+     VISUAL GLITCH HELPERS
+  --------------------------------------------------------- */
+  function glitchPulse(durationMs){
+    body.classList.add('terminal-glitch');
+    setTimeout(function(){
+      body.classList.remove('terminal-glitch');
+    }, durationMs || 600);
+  }
+
+  /* ---------------------------------------------------------
+     OUTPUT HELPERS
+  --------------------------------------------------------- */
+  function line(text, cls){
+    var d = document.createElement('div');
+    d.className = 'l ' + (cls || 'l-out');
+    d.textContent = text;
+    out.appendChild(d);
+    out.scrollTop = out.scrollHeight;
+  }
+  function lines(arr, cls){ arr.forEach(function(t){ line(t, cls); }); }
+  function blank(){ line('', 'l-out'); }
+
+  function intro(){
+    lines([
+      "node049 remote shell",
+      "last login: " + new Date().toUTCString(),
+      "----------------------------------------------------------",
+      "type 'help' for a list of commands."
+    ], 'l-dim');
+    blank();
+  }
+
+  /* ---------------------------------------------------------
+     help
+  --------------------------------------------------------- */
+  function cmdHelp(){
+    lines([
+      "COMMANDS:",
+      "  help              show this list",
+      "  status            show node status / system warnings",
+      "  ls                list files in current directory",
+      "  cat <file>        print contents of a file",
+      "  netstat           show active socket connections",
+      "  trace             run an interactive network trace",
+      "  override <key>    attempt privileged kernel override",
+      "  clear             clear the screen"
+    ], 'l-out');
+  }
+
+  /* ---------------------------------------------------------
+     status  (glitch + audio surge)
+  --------------------------------------------------------- */
+  function cmdStatus(){
+    glitchPulse(600);
+    audioSurge(600);
+    lines([
+      "NODE STATUS -- overworld_shard_07",
+      "----------------------------------------------------------",
+      "[SYS/INFO]: uptime 741d 09h 12m",
+      "[SYS/INFO]: active player sessions: 2 (expected: 1)",
+      "[WORLD/WARN]: chunk regeneration outside operator command",
+      "[ENTITY/WARN]: secondary instance skin_hash mismatch",
+      "[ENTITY/WARN]: instance behavior pattern match: 99.97% (source: operator routine log)",
+      "[NET/WARN]: Storage buffer encrypted. Fragment alpha cached at: Window.localStorage['node_sector']",
+      "[SYS/WARN]: override subsystem awaiting valid key (2 fragments required)",
+      "----------------------------------------------------------"
+    ], 'l-out');
+  }
+
+  /* ---------------------------------------------------------
+     ls
+  --------------------------------------------------------- */
+  function cmdLs(){
+    lines([
+      "instance_log.raw        2.1K",
+      "routine_analysis.txt    1.4K",
+      "victim_archive.dat      0.6K",
+      "encrypted_signal.b64    0.1K",
+      ".sys_config             0.4K"
+    ], 'l-out');
+  }
+
+  /* ---------------------------------------------------------
+     cat <file>
+  --------------------------------------------------------- */
+  function cmdCat(arg){
+    if(!arg){
+      line("usage: cat <file>", 'l-warn');
+      return;
+    }
+    var f = arg.trim();
+
+    if(f === 'instance_log.raw'){
+      lines([
+        "---- instance_log.raw ----",
+        "[04:12:01] [SYS/INFO]: player 'operator' joined overworld_shard_07",
+        "[04:12:01] [SYS/INFO]: 1 entity loaded from disk",
+        "[06:47:33] [WORLD/WARN]: chunk (14,-9) regenerated -- no operator command issued",
+        "[06:47:34] [ENTITY/WARN]: unregistered entity instance detected at (112, 68, -204)",
+        "[06:47:34] [ENTITY/WARN]: instance shares player UUID -- rejecting duplicate, retrying",
+        "[06:47:35] [ENTITY/WARN]: rejection failed. duplicate UUID accepted by world save.",
+        "[06:47:40] [INPUT/WARN]: input buffer desync -- local and remote keystrokes",
+        "           arriving on the same tick",
+        "[09:03:12] [NET/WARN]: Storage buffer encrypted. Fragment alpha cached at: Window.localStorage['node_sector']",
+        "[09:03:12] [NET/INFO]: awaiting operator override to purge duplicate instance",
+        "---- end of file ----"
+      ], 'l-out');
+
+    } else if(f === 'routine_analysis.txt'){
+      lines([
+        "--- RECOVERED OPERATOR LOG: THE RESONANCE OF ROUTINE ---",
+        "It doesn't attack you with raw strength. It attacks you with your own habits.",
+        "Have you ever noticed how you always place your torches on the right side of the wall?",
+        "How you put your sword in slot 1 and your pickaxe in slot 2?",
+        "How you walk the exact same path from your bed to your mine every single morning?",
+        "",
+        "You think you are playing the game, but you are just executing a script.",
+        "That thing in the shadows? It didn't have to learn how to imitate you.",
+        "You trained it yourself by doing the exact same thing three thousand times.",
+        "",
+        "Look at the bases left behind by the others. They all built the same house.",
+        "They all dug the same staircases. They stopped thinking, and the loop swallowed them whole.",
+        "If you want to survive it, stop playing like a human."
+      ], 'l-lore');
+
+    } else if(f === 'victim_archive.dat'){
+      lines([
+        "---- victim_archive.dat (ENCODED) ----",
+        "Ubfg 0x004N: Ergheaag gb fnzr ebhgvar sbe 400 ubhef. Sbez cfevaed. Ubfg 0x009O: Onfr ebhgvar sbhaq pbecbcf. Purefg ebj fvyrag. Trarengrq rpub cfevcb.",
+        "---- end of encoded block ----",
+        "( this archive is not stored in plaintext. an external cipher tool",
+        "  will be required to recover the original text. )"
+      ], 'l-cipher');
+
+    } else if(f === 'encrypted_signal.b64'){
+      lines([
+        "---- encrypted_signal.b64 (RAW) ----",
+        "W05FVC9IQUxUXTogS2V5IGZyYWdtZW50IGJldGE6ICdfc2V2ZXJhbmNlJw==",
+        "---- end of raw block ----",
+        "( this signal is base64-encoded. decode it externally to",
+        "  recover fragment beta. )"
+      ], 'l-cipher');
+
+    } else if(f === '.sys_config'){
+      lines([
+        "---- .sys_config ----",
+        "node_id=AETHERIA-CLOUD-049",
+        "kernel=ECHO_KERNEL v2.3.1",
+        "override_required=true",
+        "override_fragments_required=2",
+        "override_source=CLIENT_CACHE + EXTERNAL_SIGNAL",
+        "loop_detection=enabled",
+        "---- end of file ----"
+      ], 'l-out');
+
+    } else {
+      line("cat: " + f + ": no such file", 'l-crit');
+    }
+  }
+
+  /* ---------------------------------------------------------
+     netstat  (glitch + audio surge)
+  --------------------------------------------------------- */
+  function cmdNetstat(){
+    glitchPulse(600);
+    audioSurge(600);
+    lines([
+      "ACTIVE CONNECTIONS",
+      "----------------------------------------------------------",
+      "Proto  Local Address        Foreign Address       State",
+      "tcp    0.0.0.0:25565        --                    LISTEN",
+      "tcp    10.0.0.4:51422       aetheria-relay:443    ESTABLISHED",
+      "tcp    127.0.0.1:0000       127.0.0.1:0000         ESTABLISHED",
+      "                            (ECHOFORM)",
+      "----------------------------------------------------------",
+      "NOTE: socket 127.0.0.1:0000 was not opened by this session."
+    ], 'l-out');
+  }
+
+  /* ---------------------------------------------------------
+     trace  (interactive-feeling network trace, glitch + surge)
+  --------------------------------------------------------- */
+  function cmdTrace(){
+    glitchPulse(600);
+    audioSurge(600);
+    line("tracing local player sockets ...", 'l-dim');
+
+    var hops = [
+      "  1  operator_client         0.4ms   synced",
+      "  2  node049_relay           2.1ms   synced",
+      "  3  overworld_shard_07      3.6ms   synced",
+      "  4  instance_00 (you)       3.6ms   synced",
+      "  5  instance_01 (ECHOFORM)  3.6ms   synced -- same tick as hop 4"
+    ];
+
+    var i = 0;
+    function step(){
+      if(i >= hops.length){
+        line("trace complete: 2 endpoints resolved to 1 player action stream.", 'l-warn');
+        return;
+      }
+      line(hops[i], 'l-out');
+      i++;
+      setTimeout(step, 260);
+    }
+    step();
+  }
+
+  /* ---------------------------------------------------------
+     override <key>  (glitch + audio surge, then crash on success)
+  --------------------------------------------------------- */
+  function cmdOverride(arg){
+    if(!arg){
+      line("usage: override <key>", 'l-warn');
+      return;
+    }
+    if(overrideComplete){
+      line("override already applied. node has already crashed once.", 'l-dim');
+      return;
+    }
+
+    glitchPulse(600);
+    audioSurge(600);
+
+    if(arg.trim() === KERNEL_KEY){
+      overrideComplete = true;
+      setTimeout(function(){
+        runCrashSequence();
+      }, 650);
+    } else {
+      line("override rejected: invalid or incomplete key.", 'l-crit');
+    }
+  }
+
+  /* ---------------------------------------------------------
+     clear
+  --------------------------------------------------------- */
+  function cmdClear(){ out.innerHTML = ''; }
+
+  /* ---------------------------------------------------------
+     Final crash sequence: cut audio to complete silence, hide
+     the input prompt, heavy CRT distortion, then raw crash
+     report rendered into the DOM.
+  --------------------------------------------------------- */
+  function runCrashSequence(){
+    line("override accepted. purging duplicate instance ...", 'l-warn');
+
+    audioCutToSilence(500);
+    row.classList.add('hidden');
+    body.classList.add('terminal-glitch-hard');
+
+    setTimeout(function(){
+      lines([
+        "[SYS/WARN]: kernel override in progress",
+        "[SYS/WARN]: instance_01 refusing termination signal",
+        "[SYS/CRIT]: write access already held by instance_01"
+      ], 'l-crit');
+    }, 250);
+
+    setTimeout(function(){
+      body.classList.remove('terminal-glitch-hard');
+      renderCrash();
+    }, 1600);
+  }
+
+  function pad2(n){ return n.toString().padStart(2,'0'); }
+
+  function buildCrash(){
+    var now = new Date();
+    var d = now.getFullYear() + "-" + pad2(now.getMonth()+1) + "-" + pad2(now.getDate());
+    var t = pad2(now.getHours()) + "." + pad2(now.getMinutes()) + "." + pad2(now.getSeconds());
+    var addr = "0x" + Math.floor(Math.random()*0xFFFFFFFF).toString(16).toUpperCase().padStart(8,'0');
+
+    var L = [];
+    L.push(["---- Minecraft Crash Report ----", "l-crash-head"]);
+    L.push(["// The cycle has been broken by host intervention. Local process purged.", "l-crash"]);
+    L.push(["", "l-crash"]);
+    L.push(["Time: " + d + " " + t, "l-crash"]);
+    L.push(["Description: Ticking entity", "l-crash"]);
+    L.push(["", "l-crash"]);
+    L.push(["java.lang.IllegalStateException: Duplicate player UUID could not be resolved", "l-crash-head"]);
+    L.push(["\tat net.aetheria.echo.EntityEchoform.tick(EchoformEntity.java:187)", "l-crash"]);
+    L.push(["\tat net.aetheria.echo.EntityEchoform.replayRoutine(EchoformEntity.java:301)", "l-crash"]);
+    L.push(["\tat net.aetheria.echo.EntityEchoform.claimIdentity(EchoformEntity.java:96)", "l-crash"]);
+    L.push(["\tat net.aetheria.echo.MirrorSync.resolveOwnership(MirrorSync.java:44)", "l-crash"]);
+    L.push(["\tat net.aetheria.echo.MirrorSync.combineFragments(MirrorSync.java:58)", "l-crash"]);
+    L.push(["\tat net.aetheria.echo.MirrorSync.readCachedKey(MirrorSync.java:21)", "l-crash"]);
+    L.push(["\tat net.minecraft.world.level.Level.tickNonPassenger(Level.java:501)", "l-crash"]);
+    L.push(["\tat net.minecraft.world.level.Level.guardEntityTick(Level.java:498)", "l-crash"]);
+    L.push(["\tat net.minecraft.server.MinecraftServer.tickChildren(MinecraftServer.java:822)", "l-crash"]);
+    L.push(["\tat net.minecraft.server.MinecraftServer.tickServer(MinecraftServer.java:790)", "l-crash"]);
+    L.push(["\tat net.minecraft.server.MinecraftServer.run(MinecraftServer.java:731)", "l-crash"]);
+    L.push(["", "l-crash"]);
+    L.push(["-- Head --", "l-crash-head"]);
+    L.push(["Thread: Server thread", "l-crash"]);
+    L.push(["Stacktrace:", "l-crash"]);
+    L.push(["\tat net.aetheria.echo.EntityEchoform.getOwnerUUID(EchoformEntity.java:33)", "l-crash"]);
+    L.push(["\tat net.aetheria.echo.EntityEchoform.getOwnerUUID(EchoformEntity.java:33)", "l-crash"]);
+    L.push(["\t... (frame repeats; stack depth exceeds expected bounds, truncated)", "l-crash"]);
+    L.push(["", "l-crash"]);
+    L.push(["-- Affected level --", "l-crash-head"]);
+    L.push(["Level name: overworld_shard_07", "l-crash"]);
+    L.push(["All players: 2 total; [", "l-crash"]);
+    L.push(["  ServerPlayer['operator'/1, l='overworld_shard_07', pos=(112.4, 68.0, -204.1)],", "l-crash"]);
+    L.push(["  ServerPlayer['operator'/2, l='overworld_shard_07', pos=(112.4, 68.0, -204.1)]", "l-crash"]);
+    L.push(["]", "l-crash"]);
+    L.push(["NOTE: both listed players share identical UUID and identical coordinates.", "l-crit"]);
+    L.push(["NOTE: instance_02 action history matches instance_01 with zero deviation", "l-crit"]);
+    L.push(["      across 3000+ logged ticks.", "l-crit"]);
+    L.push(["", "l-crash"]);
+    L.push(["-- System Details --", "l-crash-head"]);
+    L.push(["Minecraft Version: 1.20.4-aetheria-custom", "l-crash"]);
+    L.push(["Operating System: NODE_OS 049 (remote, headless)", "l-crash"]);
+    L.push(["Memory: 1847883264 bytes (1762 MB) / 4294967296 bytes (4096 MB) up to 4294967296 bytes (4096 MB)", "l-crash"]);
+    L.push(["Allocation ID: " + addr, "l-crash"]);
+    L.push(["CPUs: 4", "l-crash"]);
+    L.push(["Is Modded: Definitely; 'aetheria_echo_protocol' [Echo Protocol] present", "l-crash"]);
+    L.push(["Type: Dedicated Server (map_server.txt)", "l-crash"]);
+    L.push(["", "l-crash"]);
+    L.push(["#@!@# Game crashed! Crash report saved to: ./crash-reports/crash-" + d + "-" + t + "-server.txt", "l-crash-head"]);
+    L.push(["", "l-crash"]);
+    L.push(["// The cycle has been broken by host intervention. Local process purged.", "l-final"]);
+    return L;
+  }
+
+  function renderCrash(){
+    out.style.display = 'none';
+    crash.innerHTML = '';
+    crash.classList.add('visible');
+
+    var report = buildCrash();
+    var i = 0;
+    function step(){
+      if(i >= report.length) return;
+      var entry = report[i];
+      var d = document.createElement('div');
+      d.className = 'l ' + entry[1];
+      d.textContent = entry[0];
+      crash.appendChild(d);
+      crash.scrollTop = crash.scrollHeight;
+      i++;
+      var delay = (i === report.length) ? 1300 : (18 + Math.random()*30);
+      setTimeout(step, delay);
+    }
+    step();
+  }
+
+  /* ---------------------------------------------------------
+     dispatch
+  --------------------------------------------------------- */
+  function run(raw){
+    var trimmed = raw.trim();
+    if(!trimmed) return;
+    line("$ " + trimmed, 'l-in');
+
+    var parts = trimmed.split(/\s+/);
+    var cmd = parts[0].toLowerCase();
+    var arg = parts.slice(1).join(' ');
+
+    switch(cmd){
+      case 'help': cmdHelp(); break;
+      case 'status': cmdStatus(); break;
+      case 'ls': cmdLs(); break;
+      case 'cat': cmdCat(arg); break;
+      case 'netstat': cmdNetstat(); break;
+      case 'trace': cmdTrace(); break;
+      case 'override': cmdOverride(arg); break;
+      case 'clear': cmdClear(); break;
+      default: line(cmd + ": command not found", 'l-warn');
+    }
+  }
+
+  var hist = [], hidx = -1;
+  input.addEventListener('keydown', function(e){
+    if(e.key === 'Enter'){
+      var v = input.value;
+      if(v.trim()){ hist.push(v); hidx = hist.length; }
+      input.value = '';
+      run(v);
+    } else if(e.key === 'ArrowUp'){
+      if(!hist.length) return;
+      hidx = Math.max(0, hidx-1);
+      input.value = hist[hidx] || '';
+      e.preventDefault();
+    } else if(e.key === 'ArrowDown'){
+      if(!hist.length) return;
+      hidx = Math.min(hist.length, hidx+1);
+      input.value = hist[hidx] || '';
+      e.preventDefault();
+    }
+  });
+
+  document.getElementById('crt').addEventListener('click', function(){
+    if(!crash.classList.contains('visible')) input.focus();
+  });
+
+  intro();
+  input.focus();
+})();
+</script>
+</body>
+</html>
